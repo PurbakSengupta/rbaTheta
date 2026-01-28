@@ -1,788 +1,766 @@
 """
-Enhanced main.py - Multi-Method Comparison with Turbine-by-Turbine Results
-Runs Enhanced RBA-theta, Classic RBA-theta, CUSUM, SWRT, and Adaptive methods together
-Key improvements: Comprehensive comparison, unified timing, organized results BY TURBINE
+main.py - Intelligent Event Detection and Prediction System
+CLI-based workflow orchestrator for wind turbine and power system analysis
+
+Workflow Architecture:
+1. Event Detection: Traditional RBA-theta analysis (event_detector.py)
+2. Event Prediction: ML-based forecasting with multiple approaches
+   - Binary: SARIMAX-RBA (workflow1.py)
+   - Multi-horizon: LSTM-based (workflow3.py) or Transformer-based (workflow4.py)
+   - Transfer Learning: Pre-trained models (workflow3.py)
 """
 
-import time
 import os
-import multiprocessing
+import sys
+import time
 import pandas as pd
-from core import save_xls
-import core.model as model
-from core.model import tune_mixed_strategy
+import numpy as np
+from pathlib import Path
 import logging
-from core.sensitivity import test_threshold_sensitivity, quick_threshold_test
-
-# Import all comparison methods
-try:
-    import core.classic_model as classic_model
-    CLASSIC_RBA_AVAILABLE = True
-except ImportError:
-    print("⚠️  classic_model.py not found - Classic RBA-theta will be skipped")
-    CLASSIC_RBA_AVAILABLE = False
-
-try:
-    from core.cusum_method import run_cusum_analysis
-    CUSUM_AVAILABLE = True
-except ImportError:
-    print("⚠️  cusum_method.py not found - CUSUM will be skipped")
-    CUSUM_AVAILABLE = False
-
-try:
-    from core.swrt_method import run_swrt_analysis
-    SWRT_AVAILABLE = True
-except ImportError:
-    print("⚠️  swrt_method.py not found - SWRT will be skipped")
-    SWRT_AVAILABLE = False
-
-try:
-    from core.adaptive_baselines import run_adaptive_cusum_analysis, run_adaptive_swrt_analysis
-    ADAPTIVE_AVAILABLE = True
-except ImportError:
-    print("⚠️  adaptive_baselines.py not found - Adaptive methods will be skipped")
-    ADAPTIVE_AVAILABLE = False
+from typing import Tuple, Optional, Dict
+import argparse
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('main_execution.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
-os.chdir('.')
-BASE_DIR = os.getcwd()
-path = os.path.join(BASE_DIR, r'input_data/new_8_wind_turbine_data.xlsx')
 
-def add_turbine_id_if_missing(events_df, method_name="Unknown Method"):
+class DatasetAnalyzer:
     """
-    Add turbine_id to events DataFrame if not present
+    Intelligent dataset analyzer for determining data type and characteristics
     """
-    if events_df.empty:
-        return events_df
     
-    # Check if turbine_id already exists
-    turbine_cols = ['turbine_id', 'Turbine_ID', 'turbine', 'Turbine', 'turbine_number', 'turbine_column']
-    has_turbine_col = any(col in events_df.columns for col in turbine_cols)
-    
-    if not has_turbine_col:
-        logger.info(f"Adding turbine_id to {method_name} events")
-        events_with_turbine = events_df.copy()
+    def __init__(self):
+        self.wind_keywords = [
+            'wind', 'turbine', 'rotor', 'blade', 'nacelle', 'tower',
+            'wind_speed', 'wind_power', 'wind_direction', 'pitch', 'yaw'
+        ]
         
-        # Method 1: If there are columns that might indicate turbine position
-        # Look for patterns in timestamps or indices that repeat every ~8 turbines
-        if 'start_index' in events_df.columns:
-            # Use modulo operation on indices to assign turbines
-            events_with_turbine['turbine_id'] = ((events_df['start_index'] % 8) + 1).astype(int)
-            logger.info(f"Used start_index modulo 8 for turbine assignment")
-        elif 'end_index' in events_df.columns:
-            events_with_turbine['turbine_id'] = ((events_df['end_index'] % 8) + 1).astype(int)
-            logger.info(f"Used end_index modulo 8 for turbine assignment")
-        elif 'index' in events_df.columns:
-            events_with_turbine['turbine_id'] = ((events_df['index'] % 8) + 1).astype(int)
-            logger.info(f"Used index modulo 8 for turbine assignment")
-        else:
-            # Method 2: Look for any numeric column that might represent turbine
-            numeric_cols = events_df.select_dtypes(include=['int64', 'float64']).columns
-            turbine_assigned = False
-            
-            for col in numeric_cols:
-                try:
-                    unique_vals = set(events_df[col].dropna().astype(int))
-                    if unique_vals.issubset(set(range(1, 9))) and len(unique_vals) > 1:
-                        events_with_turbine['turbine_id'] = events_df[col].astype(int)
-                        logger.info(f"Using column '{col}' as turbine identifier")
-                        turbine_assigned = True
-                        break
-                except:
-                    continue
-            
-            if not turbine_assigned:
-                # Method 3: Distribute events evenly across turbines based on row position
-                num_events = len(events_df)
-                turbine_assignment = [(i % 8) + 1 for i in range(num_events)]
-                events_with_turbine['turbine_id'] = turbine_assignment
-                logger.info(f"Distributing {num_events} events evenly across 8 turbines using row position")
+        self.electricity_keywords = [
+            'price', 'electricity', 'load', 'demand', 'voltage', 'current',
+            'frequency', 'power_grid', 'transmission', 'distribution'
+        ]
         
-        return events_with_turbine
-    else:
-        # If turbine column exists, ensure it has integer values 1-8
-        existing_turbine_col = None
-        for col in turbine_cols:
-            if col in events_df.columns:
-                existing_turbine_col = col
-                break
+        self.power_keywords = [
+            'power', 'energy', 'generation', 'capacity', 'output',
+            'mw', 'kw', 'megawatt', 'kilowatt'
+        ]
+    
+    def load_dataset(self, path: str) -> Tuple[pd.DataFrame, bool]:
+        """
+        Load dataset with automatic format detection
         
-        if existing_turbine_col:
-            events_with_turbine = events_df.copy()
-            try:
-                # Try to convert to integer if possible
-                events_with_turbine['turbine_id'] = events_with_turbine[existing_turbine_col].astype(int)
-                # If we used a different column name, remove the old one
-                if existing_turbine_col != 'turbine_id':
-                    events_with_turbine = events_with_turbine.drop(columns=[existing_turbine_col])
-                logger.info(f"Converted existing turbine column '{existing_turbine_col}' to integer turbine_id")
-                return events_with_turbine
-            except:
-                # If conversion fails, try to extract numbers from strings
-                def extract_turbine_number(val):
-                    if pd.isna(val):
-                        return 1
-                    val_str = str(val)
-                    # Extract numbers from string like 'Turbine_1' -> 1
-                    import re
-                    numbers = re.findall(r'\d+', val_str)
-                    if numbers:
-                        num = int(numbers[0])
-                        return num if 1 <= num <= 8 else ((num - 1) % 8) + 1
-                    return 1
-                
-                events_with_turbine['turbine_id'] = events_with_turbine[existing_turbine_col].apply(extract_turbine_number)
-                # If we used a different column name, remove the old one
-                if existing_turbine_col != 'turbine_id':
-                    events_with_turbine = events_with_turbine.drop(columns=[existing_turbine_col])
-                logger.info(f"Extracted numbers from turbine column '{existing_turbine_col}' to create integer turbine_id")
-                return events_with_turbine
-    
-    return events_df
-
-def save_events_by_turbine(events_df, filepath, sheet_prefix="Turbine"):
-    """
-    Save events separated by turbine in different sheets
-    
-    Args:
-        events_df: DataFrame with events (will attempt to determine turbine association)
-        filepath: Path to save the Excel file
-        sheet_prefix: Prefix for sheet names (e.g., "Turbine" -> "Turbine_1", "Turbine_2", etc.)
-    """
-    if events_df.empty:
-        # Create empty file with 8 empty sheets for consistency
-        empty_sheets = {f"{sheet_prefix}_{i}": pd.DataFrame() for i in range(1, 9)}
-        save_xls(empty_sheets, filepath)
-        return
-    
-    # Determine turbine column name
-    turbine_col = None
-    possible_turbine_cols = ['turbine_id', 'Turbine_ID', 'turbine', 'Turbine', 'turbine_number', 'turbine_column']
-    for col in possible_turbine_cols:
-        if col in events_df.columns:
-            turbine_col = col
-            break
-    
-    # If no turbine column found, try to infer from column patterns or other methods
-    if turbine_col is None:
-        # Check if there are columns that might indicate turbine numbers
-        potential_cols = [col for col in events_df.columns if 'turbine' in col.lower()]
-        if potential_cols:
-            turbine_col = potential_cols[0]
-        else:
-            # Try to infer from data patterns - look for columns with values 1-8
-            for col in events_df.columns:
-                if events_df[col].dtype in ['int64', 'float64']:
-                    unique_vals = set(events_df[col].dropna().astype(int))
-                    if unique_vals.issubset(set(range(1, 9))) and len(unique_vals) > 1:
-                        turbine_col = col
-                        logger.info(f"Inferred turbine column: {col}")
-                        break
-    
-    if turbine_col is None:
-        # If still no turbine column, try alternative approaches
-        logger.warning(f"No turbine column found in events. Attempting to distribute events evenly across turbines.")
-        
-        # Create turbine assignment based on event index (distribute evenly)
-        num_events = len(events_df)
-        events_per_turbine = num_events // 8
-        remainder = num_events % 8
-        
-        turbine_assignment = []
-        for i in range(8):
-            turbine_num = i + 1
-            count = events_per_turbine + (1 if i < remainder else 0)
-            turbine_assignment.extend([turbine_num] * count)
-        
-        events_df_copy = events_df.copy()
-        events_df_copy['turbine_id'] = turbine_assignment
-        turbine_col = 'turbine_id'
-        events_df = events_df_copy
-    
-    # Group events by turbine
-    turbine_sheets = {}
-    
-    # Get unique turbine values and ensure we cover 1-8
-    if turbine_col in events_df.columns:
-        # Clean the turbine column - convert to int if possible
-        events_df_clean = events_df.copy()
+        Returns:
+            (DataFrame, success_flag)
+        """
         try:
-            # Ensure turbine_id column contains integers 1-8
-            if events_df_clean[turbine_col].dtype == 'object':
-                # Handle string values like 'Turbine_1', 'Turbine_2', etc.
-                def extract_number(val):
-                    if pd.isna(val):
-                        return 1
-                    import re
-                    numbers = re.findall(r'\d+', str(val))
-                    if numbers:
-                        num = int(numbers[0])
-                        return num if 1 <= num <= 8 else ((num - 1) % 8) + 1
-                    return 1
-                
-                events_df_clean[turbine_col] = events_df_clean[turbine_col].apply(extract_number)
+            logger.info(f"Loading dataset from: {path}")
+            
+            # Determine file extension
+            file_ext = Path(path).suffix.lower()
+            
+            if file_ext in ['.xlsx', '.xls']:
+                df = pd.read_excel(path)
+            elif file_ext == '.csv':
+                df = pd.read_csv(path)
+            elif file_ext == '.parquet':
+                df = pd.read_parquet(path)
             else:
-                events_df_clean[turbine_col] = events_df_clean[turbine_col].astype(int)
+                logger.error(f"Unsupported file format: {file_ext}")
+                return None, False
+            
+            logger.info(f"✓ Dataset loaded: {df.shape[0]} rows, {df.shape[1]} columns")
+            return df, True
+            
         except Exception as e:
-            logger.warning(f"Error converting turbine column to integer: {e}")
-            # Fallback: assign sequentially
-            num_events = len(events_df_clean)
-            events_df_clean[turbine_col] = [(i % 8) + 1 for i in range(num_events)]
-        
-        # Ensure we have sheets for all 8 turbines (even if empty)
-        for i in range(1, 9):
-            turbine_events = events_df_clean[events_df_clean[turbine_col] == i]
-            if not turbine_events.empty:
-                # Remove the turbine_id column from individual sheets since it's redundant
-                turbine_events_clean = turbine_events.drop(columns=[turbine_col])
-                turbine_sheets[f"{sheet_prefix}_{i}"] = turbine_events_clean
-            else:
-                # Create empty DataFrame for turbines with no events
-                turbine_sheets[f"{sheet_prefix}_{i}"] = pd.DataFrame()
-    else:
-        # Fallback: create empty sheets
-        for i in range(1, 9):
-            turbine_sheets[f"{sheet_prefix}_{i}"] = pd.DataFrame()
+            logger.error(f"Failed to load dataset: {e}")
+            return None, False
     
-    # Save all sheets to Excel file
-    save_xls(turbine_sheets, filepath)
-    
-    # Log summary
-    non_empty_turbines = sum(1 for df in turbine_sheets.values() if not df.empty)
-    total_events = sum(len(df) for df in turbine_sheets.values())
-    logger.info(f"Saved {total_events} events across {non_empty_turbines} turbines to {filepath}")
-    
-    # Debug information
-    if turbine_col:
-        logger.info(f"Used turbine column: {turbine_col}")
-        unique_turbines = sorted(events_df[turbine_col].unique()) if turbine_col in events_df.columns else []
-        logger.info(f"Turbines with events: {unique_turbines}")
-    else:
-        logger.warning("No turbine column could be determined")
-
-def comprehensive_analysis(path, use_optimization=True, output_dir='simulations/all_tests_together'):
-    """
-    Run all available methods on the same dataset for comprehensive comparison
-    """
-    print("\n" + "="*80)
-    print("🌪️  COMPREHENSIVE WIND TURBINE EVENT DETECTION ANALYSIS")
-    print("="*80)
-    
-    # Start total timing
-    total_start_time = time.time()
-    results_summary = {}
-    method_times = {}
-    
-    try:
-        # Load and validate data
-        print("\n📊 Loading and preparing data...")
-        data_load_start = time.time()
-        wind_data = pd.read_excel(path)
-        wind_data['DateTime'] = pd.to_datetime(wind_data['DateTime'], dayfirst=True, errors='coerce')
-        wind_data.set_index('DateTime', inplace=True)
-        data_load_time = time.time() - data_load_start
+    def detect_time_column(self, df: pd.DataFrame) -> Optional[str]:
+        """Detect time/datetime column"""
+        time_candidates = [
+            'datetime', 'date', 'time', 'timestamp', 'dt',
+            'DateTime', 'Date', 'Time', 'Timestamp'
+        ]
         
-        # Calculate nominal value
-        nominal = wind_data.select_dtypes(include='number').max().max()
-        logger.info(f"Data loaded: {len(wind_data)} records, nominal value: {nominal:.3f}")
-        logger.info(f"⏱️  Data loading time: {data_load_time:.2f} seconds")
+        # Check exact matches
+        for col in df.columns:
+            if col in time_candidates:
+                return col
         
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
+        # Check partial matches
+        for col in df.columns:
+            col_lower = col.lower()
+            if any(keyword in col_lower for keyword in ['date', 'time']):
+                return col
         
-        # ====================================================================
-        # METHOD 1: ENHANCED RBA-THETA (Current Implementation)
-        # ====================================================================
-        print("\n🚀 1. Running Enhanced RBA-theta (Current Implementation)...")
-        enhanced_start = time.time()
+        # Check data types
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                return col
         
-        try:
-            # Get optimal configuration (optional)
-            if use_optimization:
-                logger.info("   Optimizing parameters for Enhanced RBA-theta...")
-                best_config = tune_mixed_strategy(wind_data, nominal)
-                logger.info("   Parameter optimization completed")
-            else:
-                logger.info("   Using default parameters")
-                best_config = None
-
-            # Run Enhanced RBA_theta analysis
-            enhanced_results = model.RBA_theta(wind_data, nominal, best_config)
-            enhanced_sig_trad, enhanced_stat_trad, enhanced_sig_mcmc, enhanced_stat_mcmc, enhanced_tao = enhanced_results
-
-            # Add turbine identification if not present
-            enhanced_sig_trad = add_turbine_id_if_missing(enhanced_sig_trad, "Enhanced RBA Traditional Significant")
-            enhanced_stat_trad = add_turbine_id_if_missing(enhanced_stat_trad, "Enhanced RBA Traditional Stationary")
-            enhanced_sig_mcmc = add_turbine_id_if_missing(enhanced_sig_mcmc, "Enhanced RBA MCMC Significant")
-            enhanced_stat_mcmc = add_turbine_id_if_missing(enhanced_stat_mcmc, "Enhanced RBA MCMC Stationary")
-
-            # Calculate quality metrics
-            enhanced_trad_metrics = model.calculate_event_quality_metrics(enhanced_sig_trad, enhanced_stat_trad)
-            enhanced_mcmc_metrics = model.calculate_event_quality_metrics(enhanced_sig_mcmc, enhanced_stat_mcmc)
-            
-            enhanced_time = time.time() - enhanced_start
-            method_times['Enhanced RBA-theta'] = enhanced_time
-            
-            # Save Enhanced RBA-theta results BY TURBINE
-            save_events_by_turbine(enhanced_sig_trad, 
-                                 os.path.join(output_dir, 'enhanced_rba_traditional_significant.xlsx'),
-                                 'Turbine')
-            save_events_by_turbine(enhanced_stat_trad, 
-                                 os.path.join(output_dir, 'enhanced_rba_traditional_stationary.xlsx'),
-                                 'Turbine')
-            save_events_by_turbine(enhanced_sig_mcmc, 
-                                 os.path.join(output_dir, 'enhanced_rba_mcmc_significant.xlsx'),
-                                 'Turbine')
-            save_events_by_turbine(enhanced_stat_mcmc, 
-                                 os.path.join(output_dir, 'enhanced_rba_mcmc_stationary.xlsx'),
-                                 'Turbine')
-            
-            enhanced_total_events = len(enhanced_sig_trad) + len(enhanced_stat_trad) + len(enhanced_sig_mcmc) + len(enhanced_stat_mcmc)
-            results_summary['Enhanced RBA-theta'] = {
-                'total_events': enhanced_total_events,
-                'traditional_events': len(enhanced_sig_trad) + len(enhanced_stat_trad),
-                'mcmc_events': len(enhanced_sig_mcmc) + len(enhanced_stat_mcmc),
-                'trad_quality': enhanced_trad_metrics['overall']['balance_score'],
-                'mcmc_quality': enhanced_mcmc_metrics['overall']['balance_score'],
-                'time': enhanced_time,
-                'status': 'Success'
+        return None
+    
+    def detect_dataset_type(self, df: pd.DataFrame) -> Dict:
+        """
+        Perform comprehensive dataset analysis
+        
+        Returns:
+            {
+                'type': 'wind' | 'electricity' | 'power' | 'unknown',
+                'confidence': float (0-1),
+                'time_column': str or None,
+                'target_columns': list,
+                'resolution': str (e.g., '10min', '1h'),
+                'duration': str (e.g., '2 years'),
+                'missing_data_pct': float
             }
-            
-            print(f"   ✅ Enhanced RBA-theta completed: {enhanced_total_events} events in {enhanced_time:.2f}s")
-            
-        except Exception as e:
-            enhanced_time = time.time() - enhanced_start
-            method_times['Enhanced RBA-theta'] = enhanced_time
-            results_summary['Enhanced RBA-theta'] = {'status': f'Failed: {e}', 'time': enhanced_time}
-            print(f"   ❌ Enhanced RBA-theta failed: {e}")
-
-        # ====================================================================
-        # METHOD 2: CLASSIC RBA-THETA (Original Implementation)
-        # ====================================================================
-        if CLASSIC_RBA_AVAILABLE:
-            print("\n📚 2. Running Classic RBA-theta (Original Implementation)...")
-            classic_start = time.time()
-            
-            try:
-                # Run Classic RBA_theta analysis (returns different format)
-                classic_results = classic_model.RBA_theta(wind_data, nominal)
-                classic_sig_events_dict, classic_stat_events_dict, classic_tao = classic_results
-
-                # Convert dictionary format to DataFrame format for consistency
-                def convert_dict_to_dataframe(event_dict):
-                    if not event_dict or all(df.empty for df in event_dict.values() if hasattr(df, 'empty')):
-                        return pd.DataFrame()
-                    valid_events = []
-                    for turbine_id, events_df in event_dict.items():
-                        if hasattr(events_df, 'empty') and not events_df.empty:
-                            events_copy = events_df.copy()
-                            # Extract turbine number from key (e.g., 'Turbine_1' -> 1)
-                            if isinstance(turbine_id, str) and '_' in turbine_id:
-                                turbine_num = int(turbine_id.split('_')[-1])
-                            elif isinstance(turbine_id, str) and turbine_id.isdigit():
-                                turbine_num = int(turbine_id)
-                            elif isinstance(turbine_id, (int, float)):
-                                turbine_num = int(turbine_id)
-                            else:
-                                # Fallback: try to extract number from string
-                                import re
-                                numbers = re.findall(r'\d+', str(turbine_id))
-                                turbine_num = int(numbers[0]) if numbers else 1
-                            events_copy['turbine_id'] = turbine_num
-                            valid_events.append(events_copy)
-                    return pd.concat(valid_events, ignore_index=True) if valid_events else pd.DataFrame()
-
-                classic_sig_trad = convert_dict_to_dataframe(classic_sig_events_dict)
-                classic_stat_trad = convert_dict_to_dataframe(classic_stat_events_dict)
-                
-                # Classic model doesn't have MCMC variants, so create empty DataFrames
-                classic_sig_mcmc = pd.DataFrame()
-                classic_stat_mcmc = pd.DataFrame()
-
-                # Calculate quality metrics using the same function as enhanced
-                if hasattr(model, 'calculate_event_quality_metrics'):
-                    classic_trad_metrics = model.calculate_event_quality_metrics(classic_sig_trad, classic_stat_trad)
-                    classic_mcmc_metrics = {'overall': {'balance_score': 0.0}}  # No MCMC in classic
-                else:
-                    # Fallback: use classic model's own quality calculation
-                    classic_trad_metrics = classic_model.calculate_quality_metrics(classic_sig_trad, classic_stat_trad)
-                    classic_mcmc_metrics = {'overall': {'balance_score': 0.0}}
-                
-                classic_time = time.time() - classic_start
-                method_times['Classic RBA-theta'] = classic_time
-                
-                # Save Classic RBA-theta results BY TURBINE
-                save_events_by_turbine(classic_sig_trad, 
-                                     os.path.join(output_dir, 'classic_rba_significant_events.xlsx'),
-                                     'Turbine')
-                save_events_by_turbine(classic_stat_trad, 
-                                     os.path.join(output_dir, 'classic_rba_stationary_events.xlsx'),
-                                     'Turbine')
-                
-                classic_total_events = len(classic_sig_trad) + len(classic_stat_trad)
-                results_summary['Classic RBA-theta'] = {
-                    'total_events': classic_total_events,
-                    'traditional_events': classic_total_events,  # Classic only has traditional
-                    'mcmc_events': 0,  # No MCMC in classic
-                    'trad_quality': classic_trad_metrics['overall']['balance_score'],
-                    'mcmc_quality': 0.0,  # No MCMC in classic
-                    'time': classic_time,
-                    'status': 'Success'
-                }
-                
-                print(f"   ✅ Classic RBA-theta completed: {classic_total_events} events in {classic_time:.2f}s")
-                
-            except Exception as e:
-                classic_time = time.time() - classic_start
-                method_times['Classic RBA-theta'] = classic_time
-                results_summary['Classic RBA-theta'] = {'status': f'Failed: {e}', 'time': classic_time}
-                print(f"   ❌ Classic RBA-theta failed: {e}")
-        else:
-            print("\n⏭️  2. Classic RBA-theta skipped (not available)")
-
-        # ====================================================================
-        # METHOD 3: CUSUM METHOD
-        # ====================================================================
+        """
+        logger.info("\n" + "="*80)
+        logger.info("DATASET ANALYSIS")
+        logger.info("="*80)
         
-        if CUSUM_AVAILABLE:
-            print("\n📈 3. Running CUSUM Method...")
-            cusum_start = time.time()
-            
-            try:
-                cusum_events = run_cusum_analysis(wind_data)
-                # Add turbine identification
-                cusum_events = add_turbine_id_if_missing(cusum_events, "CUSUM")
-                
-                cusum_time = time.time() - cusum_start
-                method_times['CUSUM'] = cusum_time
-                
-                # Save CUSUM results BY TURBINE
-                save_events_by_turbine(cusum_events, 
-                                     os.path.join(output_dir, 'cusum_events.xlsx'),
-                                     'Turbine')
-                
-                cusum_total_events = len(cusum_events)
-                results_summary['CUSUM'] = {
-                    'total_events': cusum_total_events,
-                    'time': cusum_time,
-                    'status': 'Success'
-                }
-                
-                print(f"   ✅ CUSUM completed: {cusum_total_events} events in {cusum_time:.2f}s")
-                
-            except Exception as e:
-                cusum_time = time.time() - cusum_start
-                method_times['CUSUM'] = cusum_time
-                results_summary['CUSUM'] = {'status': f'Failed: {e}', 'time': cusum_time}
-                print(f"   ❌ CUSUM failed: {e}")
-        else:
-            print("\n⏭️  3. CUSUM skipped (not available)")
-
-        # ====================================================================
-        # METHOD 4: SWRT METHOD
-        # ====================================================================
-        if SWRT_AVAILABLE:
-            print("\n🌪️  4. Running SWRT Method...")
-            swrt_start = time.time()
-            
-            try:
-                swrt_events = run_swrt_analysis(wind_data, nominal)
-                # Add turbine identification
-                swrt_events = add_turbine_id_if_missing(swrt_events, "SWRT")
-                
-                swrt_time = time.time() - swrt_start
-                method_times['SWRT'] = swrt_time
-                
-                # Save SWRT results BY TURBINE
-                save_events_by_turbine(swrt_events, 
-                                     os.path.join(output_dir, 'swrt_events.xlsx'),
-                                     'Turbine')
-                
-                swrt_total_events = len(swrt_events)
-                results_summary['SWRT'] = {
-                    'total_events': swrt_total_events,
-                    'time': swrt_time,
-                    'status': 'Success'
-                }
-                
-                print(f"   ✅ SWRT completed: {swrt_total_events} events in {swrt_time:.2f}s")
-                
-            except Exception as e:
-                swrt_time = time.time() - swrt_start
-                method_times['SWRT'] = swrt_time
-                results_summary['SWRT'] = {'status': f'Failed: {e}', 'time': swrt_time}
-                print(f"   ❌ SWRT failed: {e}")
-        else:
-            print("\n⏭️  4. SWRT skipped (not available)")
-
-        # ====================================================================
-        # METHOD 5: ADAPTIVE CUSUM
-        # ====================================================================
-        if ADAPTIVE_AVAILABLE:
-            print("\n🔧 5. Running Adaptive CUSUM...")
-            adaptive_cusum_start = time.time()
-            
-            try:
-                adaptive_cusum_events = run_adaptive_cusum_analysis(wind_data)
-                # Add turbine identification
-                adaptive_cusum_events = add_turbine_id_if_missing(adaptive_cusum_events, "Adaptive CUSUM")
-                
-                adaptive_cusum_time = time.time() - adaptive_cusum_start
-                method_times['Adaptive CUSUM'] = adaptive_cusum_time
-                
-                # Save Adaptive CUSUM results BY TURBINE
-                save_events_by_turbine(adaptive_cusum_events, 
-                                     os.path.join(output_dir, 'adaptive_cusum_events.xlsx'),
-                                     'Turbine')
-                
-                adaptive_cusum_total_events = len(adaptive_cusum_events)
-                results_summary['Adaptive CUSUM'] = {
-                    'total_events': adaptive_cusum_total_events,
-                    'time': adaptive_cusum_time,
-                    'status': 'Success'
-                }
-                
-                print(f"   ✅ Adaptive CUSUM completed: {adaptive_cusum_total_events} events in {adaptive_cusum_time:.2f}s")
-                
-            except Exception as e:
-                adaptive_cusum_time = time.time() - adaptive_cusum_start
-                method_times['Adaptive CUSUM'] = adaptive_cusum_time
-                results_summary['Adaptive CUSUM'] = {'status': f'Failed: {e}', 'time': adaptive_cusum_time}
-                print(f"   ❌ Adaptive CUSUM failed: {e}")
-
-            # ====================================================================
-            # METHOD 6: ADAPTIVE SWRT
-            # ====================================================================
-            print("\n🌪️  6. Running Adaptive SWRT...")
-            adaptive_swrt_start = time.time()
-            
-            try:
-                adaptive_swrt_events = run_adaptive_swrt_analysis(wind_data, nominal)
-                # Add turbine identification  
-                adaptive_swrt_events = add_turbine_id_if_missing(adaptive_swrt_events, "Adaptive SWRT")
-                
-                adaptive_swrt_time = time.time() - adaptive_swrt_start
-                method_times['Adaptive SWRT'] = adaptive_swrt_time
-                
-                # Save Adaptive SWRT results BY TURBINE
-                save_events_by_turbine(adaptive_swrt_events, 
-                                     os.path.join(output_dir, 'adaptive_swrt_events.xlsx'),
-                                     'Turbine')
-                
-                adaptive_swrt_total_events = len(adaptive_swrt_events)
-                results_summary['Adaptive SWRT'] = {
-                    'total_events': adaptive_swrt_total_events,
-                    'time': adaptive_swrt_time,
-                    'status': 'Success'
-                }
-                
-                print(f"   ✅ Adaptive SWRT completed: {adaptive_swrt_total_events} events in {adaptive_swrt_time:.2f}s")
-                
-            except Exception as e:
-                adaptive_swrt_time = time.time() - adaptive_swrt_start
-                method_times['Adaptive SWRT'] = adaptive_swrt_time
-                results_summary['Adaptive SWRT'] = {'status': f'Failed: {e}', 'time': adaptive_swrt_time}
-                print(f"   ❌ Adaptive SWRT failed: {e}")
-        else:
-            print("\n⏭️  5-6. Adaptive methods skipped (not available)")
-
-        # ====================================================================
-        # GENERATE COMPREHENSIVE COMPARISON REPORT
-        # ====================================================================
-        total_time = time.time() - total_start_time
-        
-        print("\n" + "="*80)
-        print("📊 COMPREHENSIVE ANALYSIS RESULTS")
-        print("="*80)
-        
-        # Create comparison DataFrame
-        comparison_data = []
-        for method, result in results_summary.items():
-            if result['status'] == 'Success':
-                row = {
-                    'Method': method,
-                    'Total_Events': result['total_events'],
-                    'Execution_Time_s': result['time'],
-                    'Events_per_Second': result['total_events'] / result['time'] if result['time'] > 0 else 0,
-                    'Status': result['status']
-                }
-                
-                # Add RBA-specific metrics
-                if 'traditional_events' in result:
-                    row['Traditional_Events'] = result['traditional_events']
-                    row['MCMC_Events'] = result['mcmc_events']
-                    row['Traditional_Quality'] = result['trad_quality']
-                    row['MCMC_Quality'] = result['mcmc_quality']
-                
-                comparison_data.append(row)
-            else:
-                comparison_data.append({
-                    'Method': method,
-                    'Total_Events': 0,
-                    'Execution_Time_s': result['time'],
-                    'Events_per_Second': 0,
-                    'Status': result['status']
-                })
-        
-        comparison_df = pd.DataFrame(comparison_data)
-        
-        # Save comparison report
-        save_xls({'Method_Comparison': comparison_df}, 
-                os.path.join(output_dir, 'method_comparison_report.xlsx'))
-        
-        # Print summary table
-        print(f"📋 Results saved to: {output_dir}")
-        print("\n🏆 METHOD PERFORMANCE SUMMARY:")
-        print("-" * 80)
-        for _, row in comparison_df.iterrows():
-            if row['Status'] == 'Success':
-                print(f"{row['Method']:<20} | {row['Total_Events']:>6} events | {row['Execution_Time_s']:>6.2f}s | {row['Events_per_Second']:>8.2f} ev/s")
-            else:
-                print(f"{row['Method']:<20} | {'FAILED':<6} | {row['Execution_Time_s']:>6.2f}s | {row['Status']}")
-        
-        print(f"\n⏱️  TOTAL EXECUTION TIME: {total_time:.2f} seconds")
-        print(f"📁 All results saved to: {output_dir}")
-        print("🗂️  Each Excel file now contains separate sheets for each turbine (Turbine_1 to Turbine_8)")
-        
-        # Performance analysis
-        successful_methods = comparison_df[comparison_df['Status'] == 'Success']
-        if len(successful_methods) > 0:
-            best_performance = successful_methods.loc[successful_methods['Events_per_Second'].idxmax()]
-            most_events = successful_methods.loc[successful_methods['Total_Events'].idxmax()]
-            fastest_method = successful_methods.loc[successful_methods['Execution_Time_s'].idxmin()]
-            
-            print(f"\n🎯 PERFORMANCE HIGHLIGHTS:")
-            print(f"   🚀 Fastest method: {fastest_method['Method']} ({fastest_method['Execution_Time_s']:.2f}s)")
-            print(f"   📊 Most events detected: {most_events['Method']} ({most_events['Total_Events']} events)")
-            print(f"   ⚡ Best throughput: {best_performance['Method']} ({best_performance['Events_per_Second']:.2f} events/s)")
-        
-        print("\n✅ Comprehensive analysis completed successfully!")
-        
-        return {
-            'total_time': total_time,
-            'results_summary': results_summary,
-            'comparison_df': comparison_df,
-            'output_dir': output_dir
+        analysis = {
+            'type': 'unknown',
+            'confidence': 0.0,
+            'time_column': None,
+            'target_columns': [],
+            'resolution': None,
+            'duration': None,
+            'missing_data_pct': 0.0
         }
         
-    except Exception as e:
-        total_time = time.time() - total_start_time
-        logger.error(f"Comprehensive analysis failed after {total_time:.2f} seconds: {e}")
-        print(f"❌ Error after {total_time:.2f} seconds: {e}")
-        raise
-
-def the_test(path, traditional_threshold=None, use_optimization=True):
-    """
-    Legacy function - redirects to comprehensive analysis for backward compatibility
-    """
-    return comprehensive_analysis(path, use_optimization)
-
-def main(path, run_comprehensive=True):
-    """
-    Enhanced main function with comprehensive multi-method analysis
-    """
-    main_start_time = time.time()
-    logger.info("Starting Comprehensive Multi-Method Wind Turbine Analysis")
-    logger.info(f"Data path: {path}")
-    
-    # Check if file exists
-    if not os.path.exists(path):
-        logger.error(f"Data file not found: {path}")
-        raise FileNotFoundError(f"Data file not found: {path}")
-    
-    try:
-        if run_comprehensive:
-            result = comprehensive_analysis(path, use_optimization=True)
+        # 1. Detect time column
+        time_col = self.detect_time_column(df)
+        analysis['time_column'] = time_col
+        
+        if time_col:
+            try:
+                df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+                time_diffs = df[time_col].diff().dropna()
+                median_diff = time_diffs.median()
+                
+                # Determine resolution
+                if median_diff < pd.Timedelta(minutes=1):
+                    analysis['resolution'] = f"{int(median_diff.total_seconds())}sec"
+                elif median_diff < pd.Timedelta(hours=1):
+                    analysis['resolution'] = f"{int(median_diff.total_seconds() / 60)}min"
+                else:
+                    analysis['resolution'] = f"{int(median_diff.total_seconds() / 3600)}h"
+                
+                # Calculate duration
+                duration = df[time_col].max() - df[time_col].min()
+                if duration.days < 30:
+                    analysis['duration'] = f"{duration.days} days"
+                elif duration.days < 365:
+                    analysis['duration'] = f"{duration.days / 30:.1f} months"
+                else:
+                    analysis['duration'] = f"{duration.days / 365:.1f} years"
+                
+                logger.info(f"✓ Time column detected: {time_col}")
+                logger.info(f"  Resolution: {analysis['resolution']}")
+                logger.info(f"  Duration: {analysis['duration']}")
+            except Exception as e:
+                logger.warning(f"Could not parse time column: {e}")
+        
+        # 2. Analyze column names for keywords
+        columns_lower = [col.lower() for col in df.columns]
+        columns_text = ' '.join(columns_lower)
+        
+        wind_score = sum(1 for kw in self.wind_keywords if kw in columns_text)
+        electricity_score = sum(1 for kw in self.electricity_keywords if kw in columns_text)
+        power_score = sum(1 for kw in self.power_keywords if kw in columns_text)
+        
+        # 3. Detect target columns (numeric columns likely to be targets)
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        if time_col and time_col in numeric_cols:
+            numeric_cols.remove(time_col)
+        
+        # Prioritize columns with power/energy keywords
+        target_candidates = []
+        for col in numeric_cols:
+            col_lower = col.lower()
+            if any(kw in col_lower for kw in ['power', 'energy', 'output', 'generation']):
+                target_candidates.append(col)
+        
+        if not target_candidates:
+            # Fallback: use all numeric columns
+            target_candidates = numeric_cols[:5]  # Limit to first 5
+        
+        analysis['target_columns'] = target_candidates
+        
+        # 4. Determine dataset type
+        total_score = wind_score + electricity_score + power_score
+        
+        if wind_score > max(electricity_score, power_score):
+            analysis['type'] = 'wind'
+            analysis['confidence'] = wind_score / max(total_score, 1)
+        elif electricity_score > max(wind_score, power_score):
+            analysis['type'] = 'electricity'
+            analysis['confidence'] = electricity_score / max(total_score, 1)
+        elif power_score > 0:
+            analysis['type'] = 'power'
+            analysis['confidence'] = power_score / max(total_score, 1)
         else:
-            # Legacy single method execution
-            result = the_test(path, use_optimization=True)
+            analysis['type'] = 'unknown'
+            analysis['confidence'] = 0.0
         
-        main_total_time = time.time() - main_start_time
-        print(f"\n⏱️  Total execution time: {main_total_time:.2f} seconds")
-        return result
+        # 5. Missing data analysis
+        missing_pct = (df.isnull().sum().sum() / (df.shape[0] * df.shape[1])) * 100
+        analysis['missing_data_pct'] = missing_pct
         
-    except Exception as e:
-        main_total_time = time.time() - main_start_time
-        logger.error(f"Main execution failed after {main_total_time:.2f} seconds: {e}")
-        raise
+        # Print analysis summary
+        logger.info(f"\nDataset Type: {analysis['type'].upper()}")
+        logger.info(f"Confidence: {analysis['confidence']*100:.1f}%")
+        logger.info(f"Shape: {df.shape[0]} rows × {df.shape[1]} columns")
+        logger.info(f"Target columns detected: {len(analysis['target_columns'])}")
+        if analysis['target_columns']:
+            logger.info(f"  Primary targets: {analysis['target_columns'][:3]}")
+        logger.info(f"Missing data: {missing_pct:.2f}%")
+        logger.info("="*80 + "\n")
+        
+        return analysis
 
-# Enhanced utility functions
-def quick_comparison(path):
-    """Quick comparison without optimization for fast results"""
-    print("🚀 Running QUICK multi-method comparison (no optimization)...")
-    return comprehensive_analysis(path, use_optimization=False)
 
-def optimized_comparison(path):
-    """Full comparison with parameter optimization"""
-    print("🔬 Running OPTIMIZED multi-method comparison (with parameter tuning)...")
-    return comprehensive_analysis(path, use_optimization=True)
-
-def method_benchmark(path, iterations=3):
+class WorkflowOrchestrator:
     """
-    Benchmark all methods multiple times for performance analysis
+    Main workflow orchestrator for event detection and prediction
     """
-    print(f"🏁 Running benchmark with {iterations} iterations...")
     
-    all_results = []
+    def __init__(self):
+        self.analyzer = DatasetAnalyzer()
+        
+        # Define workflow paths (support both flat and nested structure)
+        self.workflows = {
+            'event_detector': self._find_workflow('event_detector.py'),
+            'workflow1': self._find_workflow('workflow1.py'),
+            'workflow3': self._find_workflow('workflow3.py'),
+            'workflow4': self._find_workflow('workflow4.py')
+        }
+        
+        # Verify workflow files exist
+        self._verify_workflows()
     
-    for i in range(iterations):
-        print(f"\n📊 Iteration {i+1}/{iterations}")
+    def _find_workflow(self, filename: str) -> str:
+        """
+        Find workflow file in multiple possible locations
+        
+        Priority:
+        1. workflows/ subdirectory
+        2. Same directory as main.py
+        3. Current working directory
+        """
+        # Check workflows/ subdirectory first
+        workflows_dir = os.path.join(os.path.dirname(__file__), 'workflows', filename)
+        if os.path.exists(workflows_dir):
+            return workflows_dir
+        
+        # Check same directory as main.py
+        same_dir = os.path.join(os.path.dirname(__file__), filename)
+        if os.path.exists(same_dir):
+            return same_dir
+        
+        # Check current working directory
+        if os.path.exists(filename):
+            return filename
+        
+        # Return relative path (will be checked in _verify_workflows)
+        return os.path.join('workflows', filename)
+    
+    def _verify_workflows(self):
+        """Check if workflow scripts exist"""
+        missing = []
+        available = []
+        
+        for name, filepath in self.workflows.items():
+            if filepath and os.path.exists(filepath):
+                available.append(f"{name} ({filepath})")
+            else:
+                missing.append(f"{name} ({filepath})")
+        
+        if available:
+            logger.info(f"✓ Available workflows:")
+            for wf in available:
+                logger.info(f"  - {wf}")
+        
+        if missing:
+            logger.warning(f"⚠️  Missing workflows:")
+            for wf in missing:
+                logger.warning(f"  - {wf}")
+            logger.warning("Some features may not be available")
+    
+    def run_workflow(self, workflow_name: str, data_path: str, **kwargs) -> bool:
+        """
+        Execute a specific prediction workflow
+        """
+        logger.info("\n" + "="*80)
+        logger.info(f"RUNNING {workflow_name.upper()}")
+        logger.info("="*80)
+        
+        workflow_file = self.workflows.get(workflow_name)
+        if not workflow_file or not os.path.exists(workflow_file):
+            logger.error(f"Workflow not found: {workflow_name}")
+            logger.error(f"Expected location: {workflow_file}")
+            return False
+        
         try:
-            result = comprehensive_analysis(path, use_optimization=False)
-            all_results.append(result['results_summary'])
-        except Exception as e:
-            print(f"❌ Iteration {i+1} failed: {e}")
-    
-    # Calculate average performance
-    if all_results:
-        methods = set()
-        for result in all_results:
-            methods.update(result.keys())
-        
-        print(f"\n📈 BENCHMARK RESULTS ({iterations} iterations):")
-        print("-" * 60)
-        
-        for method in methods:
-            times = [r[method]['time'] for r in all_results if method in r and r[method]['status'] == 'Success']
-            events = [r[method]['total_events'] for r in all_results if method in r and r[method]['status'] == 'Success']
+            start_time = time.time()
             
-            if times:
-                avg_time = sum(times) / len(times)
-                avg_events = sum(events) / len(events)
-                print(f"{method:<20} | Avg: {avg_time:>6.2f}s | Avg Events: {avg_events:>6.1f}")
+            # Add workflows directory to path if it exists
+            workflows_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'workflows')
+            if os.path.exists(workflows_dir) and workflows_dir not in sys.path:
+                sys.path.insert(0, workflows_dir)
+            
+            # Also add parent directory to path
+            parent_dir = os.path.dirname(os.path.abspath(__file__))
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+            
+            # Dynamic import with better error handling
+            result = None
+            
+            if workflow_name == 'workflow3':
+                # LSTM-RBA
+                logger.info("Launching LSTM-RBA (Multi-Horizon Event-Aware Prediction)")
+                
+                use_transfer_learning = kwargs.get('transfer_learning', False)
+                if use_transfer_learning:
+                    logger.info("Using transfer learning mode")
+                
+                # Try multiple import strategies
+                try:
+                    # Strategy 1: Import from workflows package
+                    from workflows.workflow3 import main as workflow3_main
+                    result = workflow3_main(
+                        data_path=data_path,
+                        transfer_learning=use_transfer_learning,
+                        config_overrides=kwargs.get('config_overrides')
+                    )
+                except ImportError as e1:
+                    logger.warning(f"Could not import from workflows package: {e1}")
+                    try:
+                        # Strategy 2: Direct import
+                        import workflow3
+                        result = workflow3.main(
+                            data_path=data_path,
+                            transfer_learning=use_transfer_learning,
+                            config_overrides=kwargs.get('config_overrides')
+                        )
+                    except ImportError as e2:
+                        logger.error(f"Could not import workflow3 at all: {e2}")
+                        raise
+            
+            # Similar logic for workflow1 and workflow4...
+            elif workflow_name == 'workflow1':
+                logger.info("Launching SARIMAX-RBA (Binary Prediction)")
+                try:
+                    from workflows.workflow1 import main as workflow1_main
+                    result = workflow1_main(data_path=data_path, **kwargs)
+                except ImportError:
+                    import workflow1
+                    result = workflow1.main(data_path=data_path, **kwargs)
+            
+            elif workflow_name == 'workflow4':
+                logger.info("Launching Transformer-RBA (High Generalization)")
+                try:
+                    from workflows.workflow4 import main as workflow4_main
+                    result = workflow4_main(
+                        data_path=data_path,
+                        transfer_learning=kwargs.get('transfer_learning', False),
+                        config_overrides=kwargs.get('config_overrides')
+                    )
+                except ImportError:
+                    import workflow4
+                    result = workflow4.main(
+                        data_path=data_path,
+                        transfer_learning=kwargs.get('transfer_learning', False),
+                        config_overrides=kwargs.get('config_overrides')
+                    )
+            
+            execution_time = time.time() - start_time
+            logger.info(f"✓ {workflow_name} completed in {execution_time:.2f} seconds")
+            
+            # Print result summary
+            if result and isinstance(result, dict):
+                if result.get('mode') == 'transfer_learning':
+                    logger.info("Transfer learning inference completed")
+                    logger.info(f"Predictions saved to: {result.get('model_dir', 'N/A')}")
+                else:
+                    logger.info("Full training completed")
+                    logger.info(f"Results saved to: {result.get('output_dir', 'N/A')}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"{workflow_name} failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    
+    def run_event_detection(self, data_path: str) -> bool:
+        """
+        Execute event detection workflow (event_detector.py)
+        """
+        logger.info("\n" + "="*80)
+        logger.info("RUNNING EVENT DETECTION WORKFLOW")
+        logger.info("="*80)
+        
+        detector_path = self.workflows.get('event_detector')
+        if not detector_path or not os.path.exists(detector_path):
+            logger.error(f"Event detector not found: {detector_path}")
+            return False
+        
+        try:
+            # Add parent directory to path
+            parent_dir = os.path.dirname(os.path.abspath(detector_path))
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+            
+            # Import and run event_detector
+            import event_detector
+            
+            logger.info(f"Launching event detection on: {data_path}")
+            start_time = time.time()
+            
+            result = event_detector.main(data_path, run_comprehensive=True)
+            
+            execution_time = time.time() - start_time
+            logger.info(f"✓ Event detection completed in {execution_time:.2f} seconds")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Event detection failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    
+    def interactive_menu(self):
+        """
+        Interactive CLI menu for user interaction
+        """
+        print("\n" + "="*80)
+        print("🌪️  INTELLIGENT EVENT DETECTION & PREDICTION SYSTEM")
+        print("="*80)
+        print("\nWelcome! This system provides:")
+        print("  1. Traditional event detection (RBA-theta)")
+        print("  2. ML-based event prediction (SARIMAX, LSTM, Transformer integrated with RBA-theta)")
+        print("="*80 + "\n")
+        
+        # STEP 1: Choose main mode
+        print("STEP 1: Select Mode")
+        print("-" * 40)
+        print("1. Event Detection (Analyze historical events)")
+        print("2. Event Prediction (Forecast future events)")
+        
+        mode_choice = self._get_user_input("Enter your choice (1 or 2): ", ['1', '2'])
+        
+        # STEP 2: Get dataset path
+        data_path = self._get_dataset_path()
+        if not data_path:
+            logger.error("Invalid dataset path. Exiting.")
+            return
+        
+        # STEP 3: Execute based on mode
+        if mode_choice == '1':
+            # EVENT DETECTION
+            self.run_event_detection(data_path)
+        
+        else:
+            # EVENT PREDICTION
+            self._event_prediction_workflow(data_path)
+    
+    def _event_prediction_workflow(self, data_path: str):
+        """
+        Event prediction workflow with intelligent routing
+        """
+        # Analyze dataset
+        df, success = self.analyzer.load_dataset(data_path)
+        if not success:
+            logger.error("Failed to load dataset. Exiting.")
+            return
+        
+        analysis = self.analyzer.detect_dataset_type(df)
+        
+        # Check if wind-related
+        if analysis['type'] != 'wind':
+            print("\n" + "="*80)
+            print("NON-WIND DATASET DETECTED")
+            print("="*80)
+            print(f"Dataset type: {analysis['type']}")
+            print(f"Confidence: {analysis['confidence']*100:.1f}%")
+            print("\nFor non-wind power data, using LSTM-RBA workflow (workflow3.py)")
+            print("This is the most versatile approach for general time-series prediction.")
+            
+            # Always use workflow3 for non-wind data
+            self.run_workflow('workflow3', data_path)
+            return
+        
+        # WIND DATASET - Continue with detailed options
+        print("\n" + "="*80)
+        print("WIND DATASET DETECTED")
+        print("="*80)
+        print(f"Confidence: {analysis['confidence']*100:.1f}%")
+        print(f"Time resolution: {analysis['resolution']}")
+        print(f"Duration: {analysis['duration']}")
+        
+        # STEP 3: Prediction type
+        print("\n" + "-"*80)
+        print("STEP 2: Select Prediction Type")
+        print("-" * 40)
+        print("1. Binary Prediction (Event occurrence: Yes/No)")
+        print("2. Multi-Horizon Event-Aware Prediction (When, Where, How severe)")
+        
+        pred_type = self._get_user_input("Enter your choice (1 or 2): ", ['1', '2'])
+        
+        if pred_type == '1':
+            # BINARY PREDICTION -> SARIMAX-RBA
+            print("\n✓ Selected: Binary Prediction")
+            print("Using SARIMAX-RBA workflow (workflow1.py)")
+            self.run_workflow('workflow1', data_path)
+        
+        else:
+            # MULTI-HORIZON PREDICTION
+            print("\n✓ Selected: Multi-Horizon Event-Aware Prediction")
+            
+            # STEP 4: Precision vs Generalization
+            print("\n" + "-"*80)
+            print("STEP 3: Model Characteristics")
+            print("-" * 40)
+            print("1. High Precision (Best for similar conditions, detailed predictions)")
+            print("   → LSTM-RBA: Superior for well-defined patterns")
+            print("\n2. High Generalization (Best for diverse conditions, robustness)")
+            print("   → Transformer-RBA: Better for varied scenarios")
+            
+            model_type = self._get_user_input("Enter your choice (1 or 2): ", ['1', '2'])
+            
+            # STEP 5: Training mode
+            print("\n" + "-"*80)
+            print("STEP 4: Training Mode")
+            print("-" * 40)
+            print("1. Full Retraining (Train from scratch on your data)")
+            print("   → Best performance, but slower")
+            print("\n2. Transfer Learning (Use pre-trained model + fine-tuning)")
+            print("   → Faster, good for limited data")
+            
+            training_mode = self._get_user_input("Enter your choice (1 or 2): ", ['1', '2'])
+            
+            # Execute workflow based on choices
+            if training_mode == '1':
+                # FULL RETRAINING
+                if model_type == '1':
+                    # High Precision -> workflow3 (LSTM)
+                    print("\n✓ Configuration: High Precision + Full Retraining")
+                    print("Using LSTM-RBA workflow (workflow3.py)")
+                    self.run_workflow('workflow3', data_path, transfer_learning=False)
+                else:
+                    # High Generalization -> workflow4 (Transformer)
+                    print("\n✓ Configuration: High Generalization + Full Retraining")
+                    print("Using Transformer-RBA workflow (workflow4.py)")
+                    self.run_workflow('workflow4', data_path, transfer_learning=False)
+            
+            else:
+                # TRANSFER LEARNING
+                # Always use workflow3 for transfer learning (both precision types)
+                print("\n✓ Configuration: Transfer Learning")
+                print("Using LSTM-RBA workflow (workflow3.py) with transfer learning")
+                print("(Transfer learning implementation supports both precision types)")
+                self.run_workflow('workflow3', data_path, transfer_learning=True)
+    
+    def _get_user_input(self, prompt: str, valid_choices: list) -> str:
+        """Get validated user input"""
+        while True:
+            try:
+                choice = input(prompt).strip()
+                if choice in valid_choices:
+                    return choice
+                print(f"Invalid choice. Please enter one of: {', '.join(valid_choices)}")
+            except KeyboardInterrupt:
+                print("\n\nOperation cancelled by user.")
+                sys.exit(0)
+            except Exception as e:
+                print(f"Error: {e}")
+    
+    def _get_dataset_path(self) -> Optional[str]:
+        """Get and validate dataset path from user"""
+        print("\n" + "-"*80)
+        print("Dataset Input")
+        print("-" * 40)
+        
+        while True:
+            try:
+                path = input("Enter dataset path (or 'q' to quit): ").strip()
+                
+                if path.lower() == 'q':
+                    print("Exiting...")
+                    return None
+                
+                # Remove quotes if present
+                path = path.strip('"').strip("'")
+                
+                # Check if file exists
+                if os.path.exists(path):
+                    logger.info(f"✓ Dataset found: {path}")
+                    return path
+                else:
+                    print(f"❌ File not found: {path}")
+                    print("Please check the path and try again.\n")
+            
+            except KeyboardInterrupt:
+                print("\n\nOperation cancelled by user.")
+                return None
+            except Exception as e:
+                print(f"Error: {e}")
+
+
+def parse_arguments():
+    """
+    Parse command-line arguments for non-interactive mode
+    """
+    parser = argparse.ArgumentParser(
+        description='Intelligent Event Detection & Prediction System',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Interactive mode
+  python main.py
+  
+  # Event detection
+  python main.py --mode detection --data path/to/data.xlsx
+  
+  # Binary prediction
+  python main.py --mode prediction --pred-type binary --data path/to/data.xlsx
+  
+  # Multi-horizon with LSTM (full training)
+  python main.py --mode prediction --pred-type multi-horizon --model lstm --data path/to/data.xlsx
+  
+  # Multi-horizon with Transformer (transfer learning)
+  python main.py --mode prediction --pred-type multi-horizon --model transformer --transfer --data path/to/data.xlsx
+        """
+    )
+    
+    parser.add_argument(
+        '--mode',
+        choices=['detection', 'prediction'],
+        help='Operation mode: detection or prediction'
+    )
+    
+    parser.add_argument(
+        '--data',
+        type=str,
+        help='Path to dataset file'
+    )
+    
+    parser.add_argument(
+        '--pred-type',
+        choices=['binary', 'multi-horizon'],
+        help='Prediction type (only for prediction mode)'
+    )
+    
+    parser.add_argument(
+        '--model',
+        choices=['lstm', 'transformer'],
+        help='Model type for multi-horizon prediction'
+    )
+    
+    parser.add_argument(
+        '--transfer',
+        action='store_true',
+        help='Use transfer learning (only for multi-horizon)'
+    )
+    
+    return parser.parse_args()
+
+
+def main():
+    """
+    Main entry point
+    """
+    try:
+        # Parse command-line arguments
+        args = parse_arguments()
+        
+        # Create orchestrator
+        orchestrator = WorkflowOrchestrator()
+        
+        # Check if running in interactive or CLI mode
+        if args.mode is None:
+            # INTERACTIVE MODE
+            orchestrator.interactive_menu()
+        
+        else:
+            # NON-INTERACTIVE MODE (CLI)
+            if not args.data:
+                print("Error: --data argument is required in non-interactive mode")
+                sys.exit(1)
+            
+            # Validate dataset path
+            if not os.path.exists(args.data):
+                print(f"Error: Dataset not found: {args.data}")
+                sys.exit(1)
+            
+            # Execute based on mode
+            if args.mode == 'detection':
+                orchestrator.run_event_detection(args.data)
+            
+            elif args.mode == 'prediction':
+                if not args.pred_type:
+                    print("Error: --pred-type required for prediction mode")
+                    sys.exit(1)
+                
+                # Analyze dataset first
+                df, success = orchestrator.analyzer.load_dataset(args.data)
+                if not success:
+                    sys.exit(1)
+                
+                analysis = orchestrator.analyzer.detect_dataset_type(df)
+                
+                # Route to appropriate workflow
+                if args.pred_type == 'binary':
+                    # SARIMAX-RBA
+                    orchestrator.run_workflow('workflow1', args.data)
+                
+                elif args.pred_type == 'multi-horizon':
+                    if analysis['type'] != 'wind':
+                        # Non-wind -> always workflow3
+                        print(f"Non-wind dataset detected. Using LSTM-RBA (workflow3)")
+                        orchestrator.run_workflow('workflow3', args.data)
+                    else:
+                        # Wind dataset
+                        if args.transfer:
+                            # Transfer learning -> workflow3
+                            orchestrator.run_workflow('workflow3', args.data, transfer_learning=True)
+                        else:
+                            # Full training
+                            if args.model == 'transformer':
+                                orchestrator.run_workflow('workflow4', args.data)
+                            else:
+                                # Default to LSTM
+                                orchestrator.run_workflow('workflow3', args.data)
+        
+        print("\n" + "="*80)
+        print("✅ EXECUTION COMPLETED")
+        print("="*80)
+        print("Check the output directories for results.")
+        print("Logs saved to: main_execution.log")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Operation cancelled by user")
+        sys.exit(0)
+    
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        sys.exit(1)
+
 
 if __name__ == '__main__':
-    """
-    Enhanced main execution with comprehensive multi-method analysis
-    """
-    import sys
-    
-    if len(sys.argv) > 1:
-        command = sys.argv[1].lower()
-        
-        if command == 'quick':
-            # Quick comparison without optimization
-            quick_comparison(path)
-            
-        elif command == 'optimized':
-            # Full comparison with optimization
-            optimized_comparison(path)
-            
-        elif command == 'benchmark':
-            # Performance benchmark
-            iterations = int(sys.argv[2]) if len(sys.argv) > 2 else 3
-            method_benchmark(path, iterations)
-            
-        elif command == 'single':
-            # Single method (legacy mode)
-            main(path, run_comprehensive=False)
-            
-        else:
-            # Custom data path
-            main(sys.argv[1], run_comprehensive=True)
-    else:
-        # Default execution - comprehensive analysis
-        main(path, run_comprehensive=True)
+    main()

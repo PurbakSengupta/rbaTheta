@@ -238,8 +238,8 @@ def _filter_significant_events_improved(df, original_data):
     filters = []
     
     # Duration filter - reasonable range
-    min_duration = 2
-    max_duration = data_length * 0.15  # Allow longer events
+    min_duration = 2  # 2 hours minimum
+    max_duration = 96  # 4 days maximum for a ramp
     filters.append((df['∆t_m'] >= min_duration) & (df['∆t_m'] <= max_duration))
     
     # Magnitude filter - must be significant
@@ -412,8 +412,9 @@ def _filter_stationary_refined(df, original_data):
     filters = []
     
     # Duration filter - require meaningful length
-    min_duration = max(5, int(data_length * 0.001))  # At least 0.1% of data length
-    max_duration = data_length * 0.3  # Reduced from 0.7
+    min_duration = 4  # 4 hours minimum for stationary event
+    max_duration = 168  # 1 week maximum (reasonable for stationary period)
+    
     duration_filter = (df['∆t_s'] >= min_duration) & (df['∆t_s'] <= max_duration)
     filters.append(duration_filter)
     

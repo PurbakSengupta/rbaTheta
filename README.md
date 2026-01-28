@@ -1,68 +1,86 @@
-# <h1> rbaTheta: Ramping Behaviour Analysis
+# <h1> PredRBAθ: Adaptive RBAθ Event Prediction Method for Wind Turbine Monitoring Using Agentic and Advanced Signal Processing Techniques
 
 **Definition**: A sudden change in time-varying data is termed as an event. For example, a day (24 h) can be summed up with a few
 events rather than 24 individual points. This algorithm identifies such events and classifies them into **stationary** or **significant** events.
 An abrupt change is understood as a **significant** event, while a persistent flat interval is classified as **stationary**. The rest of the data carry little
 importance in decision-making contexts.
 
-![rbaTheta](/publication_figures/RBAevents_MCMC_0_150.png?raw=true)
+![PredRBATheta](/plots/zoomed_events.png?raw=true)
 
 ---
 
+PredRBAθ extends the classical RBA-theta algorithm with:
+
+- Enhanced Event Detection (Existing)
+- Event Prediction(Extended Development)
+
 ### 🗂 Directory Organization
 
-| Directory / File                       | Description                                                                 |
-| ------------------------------------- | --------------------------------------------------------------------------- |
-| `core/`                               | Contains the full event detection pipeline and supporting scripts.          |
-| ├── `event_extraction.py`            | Core event segmentation logic (updated)                                     |
-| ├── `helpers.py`                     | Utility functions for signal processing and support                         |
-| ├── `model.py`                       | Enhanced model interface with parameter control and dynamic tuning          |
-| ├── `sensitivity.py`                 | Experiments on threshold robustness and sensitivity analysis                |
-| ├── `database.py`                    | SQLite-based event logging and signal trace management                      |
-| ├── `classic_model.py` | Original RBAθ implementation from the cited literature             |
-| ├── `cusum_method.py`       | CUSUM-based ramp detection              |
-| ├── `swrt_method.py`        | SWRT method                        |                               |
-| `input_data/`                         | Contains test Excel files  shapefiles                     |
-| `Comparison_plots/`                              | Figures for comaparing different methods and their performance                              |                             |
-| `simulations/`                        | Outputs will be saved in "all_tests_together" after simulation          |
-| `main.py`                             | Unified execution script — upgraded with full control and visualization     |
-| `metric_comparison.py`               | 📊 Primary script to compare performance metrics across all methods         |
+PredRBATheta/
+│
+├── 📁 core/                          # enhanced RBATheta core modules
+├── 📁 workflows/                     # event prediction workflows
+├── 📁 input_data/                    # Datasets
+├── 📁 simulations/                   # Event detection outputs saved in "all_tests_together" after simulation
+├── 📄 main.py                        # MAIN ORCHESTRATOR - Unified execution script
+├── 📄 event_detector.py              # Event detection workflow (6 methods)
+├── 📄 requirements.txt               # Python dependencies
+├── 📄 README.md                      # readme file
 
 ---
 
 ### ▶ How to Run
 
-To run an experiment:
+1. Environment Setup
+Option A: Using Conda (Recommended)
 
-`python main.py`
-
-It calls the enhanced model and helper functions from the core/ directory and executes them using multiprocessing.
-
-For metric comparison of all methods after the simulation:
-
-`python metric_comparison.py`
-
-Upon completion, the console will display execution time and generate plots and comparison summaries.
-
-### Environment Setup
-
-Export cross-platform environment (from Windows):
-
-```conda env export --no-builds | findstr -v "prefix" > rba_non-spatial_environment.yml```
-
-Create a new conda environment:
 ```
-conda env create --name m_rba -f rba_non-spatial_environment.yml
-conda activate m_rba
+conda env create --name pred_rba -f rba_non-spatial_environment.yml
+conda activate pred_rba
+```
+Option B: Using pip
+
+```
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### Release Note
+2. Run the Main Orchestrator
 
-This is the version 0.2.0 that is the enhanced rbaTheta method. The original implementation can be found in release version 0.1.0.
+```
+python main.py
+```
 
+Interactive prompts will guide you through:
+
+Mode Selection:
+
+1 - Event Detection (Analyze historical events)
+2 - Event Prediction (Forecast future events)
+
+Dataset Selection:
+
+Enter path to your Excel file (e.g., input_data/Baltic_Eagle.xlsx)
+
+The current input_data folder is empty, so need to include your own data in there. Also, you need to run full end-to-end training on a dataset first, and then you can use transfer learning-zero shot on some other data saved in the same input_data folder. It was neeeded to adjust the space to upload in the Github.
+
+Configuration (varies by mode)
+
+### Version History
+
+This is version 0.3.0, i.e, the PredRBAθ framework. Previous implementations can be found in release 0.2.0 and 0.1.0 contains the original RBAθ framework.
+
+### 🤝 Contribution
+This is a Master's thesis research project. For collaboration or questions:
+
+Author: Purbak Sengupta
+Supervisor: Prof. Sonal Shreya
+Co-Supervisor: Prof. Sambeet Mishra
+Institution: Aarhus University
 ### Citation and License
 
-Please cite the below publication if you use this repository. The code is released under the MIT License, meaning users are free to use and modify it with explicit citation or written permission.
+Please cite the below publications if you use this repository. The code is released under the MIT License, meaning users are free to use and modify it with explicit citation or written permission.
 
 [Mishra S, Ören E, Bordin C, Wen F, Palu I. Features extraction of wind ramp events from a virtual wind park. *Energy Reports*. 2020 Nov 1;6:237–49.](https://doi.org/10.1016/j.egyr.2020.08.047)
 
@@ -77,3 +95,20 @@ Please cite the below publication if you use this repository. The code is releas
   publisher={Elsevier}
 }
 ```
+
+[P. Sengupta and S. Mishra, "Enhanced RBAθ method for uncertainty quantification in time varying dataset," 2025 12th International Conference on Electrical and Electronics Engineering (ICEEE), Istanbul, Turkiye, 2025, pp. 314-320.](https://doi.org/10.1109/ICEEE67194.2025.11261961)
+
+```
+@inproceedings{sengupta2025enhanced,
+  author={Sengupta, Purbak and Mishra, Sambeet},
+  booktitle={2025 12th International Conference on Electrical and Electronics Engineering (ICEEE)}, 
+  title={Enhanced RBA$\theta$ method for uncertainty quantification in time varying dataset}, 
+  year={2025},
+  pages={314-320},
+  doi={10.1109/ICEEE67194.2025.11261961}
+}
+```
+
+⭐ If you find this work useful, please consider starring the repository!
+
+Last Updated: January 1, 2026
