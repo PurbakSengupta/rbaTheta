@@ -15,17 +15,20 @@ PredRBAθ extends the classical RBA-theta algorithm with:
 - Event Prediction(Extended Development)
 
 ### 🗂 Directory Organization
-
+```
 PredRBATheta/
-│
-├── 📁 core/                          # enhanced RBATheta core modules
-├── 📁 workflows/                     # event prediction workflows
-├── 📁 input_data/                    # Datasets
-├── 📁 simulations/                   # Event detection outputs saved in "all_tests_together" after simulation
-├── 📄 main.py                        # MAIN ORCHESTRATOR - Unified execution script
-├── 📄 event_detector.py              # Event detection workflow (6 methods)
-├── 📄 requirements.txt               # Python dependencies
-├── 📄 README.md                      # readme file
+├── core/                       # Enhanced RBA-Theta core modules
+├── workflows/                  # Event prediction workflows
+├── input_data/                 # Datasets
+├── simulations/                # Event detection outputs
+│   └── all_tests_together/     # Consolidated outputs after simulation
+├── main_agentic.py             # MAIN orchestrator – unified execution script
+├── bootstrap_experience.py     # Creates synthetic prior-experience database
+│                                # used by main_agentic.py
+├── event_detector.py           # Event detection workflow (6 methods)
+├── requirements.txt            # Python dependencies
+└── README.md                   # Project documentation
+```
 
 ---
 
@@ -46,10 +49,16 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+2. Run "bootstrap_experience.py"
+```
+python bootstrap_experience.py
+```
+for first time run, choose option 1 after running bootstrap.
+
 2. Run the Main Orchestrator
 
 ```
-python main.py
+python main_agentic.py
 ```
 
 Interactive prompts will guide you through:
@@ -63,7 +72,7 @@ Dataset Selection:
 
 Enter path to your Excel file (e.g., input_data/Baltic_Eagle.xlsx)
 
-The current input_data folder is empty, so need to include your own data in there. Also, you need to run full end-to-end training on a dataset first, and then you can use transfer learning-zero shot on some other data saved in the same input_data folder. It was neeeded to adjust the space to upload in the Github.
+The current input_data folder is empty, so need to include your own data in there. Also, you need to run full end-to-end training on a dataset first, and then you can use transfer learning-zero shot on some other data saved in the same input_data folder. It was neeeded to adjust the space to upload in the Github. When you run main_agentic.py, it will inspect the dataset characteristics and suggest you to run any one of the workflows. I suggest you run all workflows once. The agentic system learns over time so the more you run different workflows on different datasets, the more the system becomes intelligent.
 
 Configuration (varies by mode)
 
